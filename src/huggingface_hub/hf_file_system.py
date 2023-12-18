@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import chain
+from glob import has_magic
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, Union
 from urllib.parse import quote, unquote
 
@@ -589,6 +590,35 @@ class HfFileSystem(fsspec.AbstractFileSystem):
         # Taken from https://github.com/fsspec/filesystem_spec/blob/3fbb6fee33b46cccb015607630843dea049d3243/fsspec/spec.py#L241
         # See https://github.com/huggingface/huggingface_hub/issues/1733
         raise NotImplementedError("Transactional commits are not supported.")
+
+    def expand_path(
+        self, path: Union[str, List[str]], recursive: bool = False, maxdepth: Optional[int] = None, **kwargs
+    ) -> List[str]:
+        # The default implementation does not allow passing custom kwargs (e.g., we use these kwargs to propagate the `revision`)
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+
+        if isinstance(path, str):
+            return self.expand_path([path], recursive, maxdepth)
+
+        out = set()
+        path = [self._strip_protocol(p) for p in path]
+        for p in path:
+            if has_magic(p):
+                bit = set(self.glob(p, **kwargs))
+                out |= bit
+                if recursive:
+                    out |= set(self.expand_path(list(bit), recursive=recursive, maxdepth=maxdepth, **kwargs))
+                continue
+            elif recursive:
+                rec = set(self.find(p, maxdepth=maxdepth, withdirs=True, detail=False, **kwargs))
+                out |= rec
+            if p not in out and (recursive is False or self.exists(p)):
+                # should only check once, for the root
+                out.add(p)
+        if not out:
+            raise FileNotFoundError(path)
+        return list(sorted(out))
 
 
 class HfFileSystemFile(fsspec.spec.AbstractBufferedFile):
